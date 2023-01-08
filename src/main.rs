@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    task::JoinHandle,
 };
 
 async fn process_socket(socket: TcpStream, server_address: String) -> Result<()> {
@@ -11,40 +10,42 @@ async fn process_socket(socket: TcpStream, server_address: String) -> Result<()>
     let (mut reader, mut writer) = listener.into_split();
     let (mut client_reader, mut client_writer) = socket.into_split();
 
-    let server_listener: JoinHandle<Result<()>> = tokio::spawn(async move {
-        let mut other_buf = Vec::new();
-        loop {
-            match reader.read_buf(&mut other_buf).await? {
-                0 => {
-                    break;
+    // If one aborts, the select! statement cancels the other future.
+    tokio::select! {
+        v = tokio::spawn(async move {
+            let mut other_buf = Vec::new();
+            loop {
+                match reader.read_buf(&mut other_buf).await? {
+                    0 => {
+                        break;
+                    }
+                    _ => {}
                 }
-                _ => {}
+
+                client_writer.write_all(&mut other_buf).await?;
+
+                other_buf = Vec::new();
             }
 
-            client_writer.write_all(&mut other_buf).await?;
+            return Ok(());
+        }) => {return v?;}
+        v = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            loop {
+                match client_reader.read_buf(&mut buf).await? {
+                    0 => {
+                        break;
+                    }
+                    _ => {}
+                }
 
-            other_buf = Vec::new();
-        }
-        return Ok(());
-    });
+                writer.write_all(&mut buf).await?;
 
-    let mut buf = Vec::new();
-    loop {
-        match client_reader.read_buf(&mut buf).await? {
-            0 => {
-                break;
+                buf = Vec::new();
             }
-            _ => {}
-        }
-
-        writer.write_all(&mut buf).await?;
-
-        buf = Vec::new();
+            return Ok(());
+        }) => {return v?;}
     }
-
-    server_listener.abort();
-
-    return Ok(());
 }
 
 #[tokio::main]
